@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/7Q-Station-Manager/types"
+	"github.com/Station-Manager/types"
 )
 
 func TestValidateConfig_ValidConfig(t *testing.T) {

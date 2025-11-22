@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/7Q-Station-Manager/logging"
-	"github.com/7Q-Station-Manager/types"
+	"github.com/Station-Manager/logging"
+	"github.com/Station-Manager/types"
 )
 
 // BenchmarkReadWithoutPooling tests traditional allocation approach

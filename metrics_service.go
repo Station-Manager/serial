@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/7Q-Station-Manager/types"
+	"github.com/Station-Manager/types"
 )
 
 // Metrics accessor and management methods for Service

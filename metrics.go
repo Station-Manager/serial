@@ -5,7 +5,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/7Q-Station-Manager/types"
+	"github.com/Station-Manager/types"
 )
 
 // Metrics tracks comprehensive serial communication health statistics

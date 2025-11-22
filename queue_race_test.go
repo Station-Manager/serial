@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/7Q-Station-Manager/types"
+	"github.com/Station-Manager/types"
 )
 
 // TestQueueChannelCloseRace tests the fix for the queue channel close race condition

@@ -5,8 +5,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/7Q-Station-Manager/logging"
-	"github.com/7Q-Station-Manager/types"
+	"github.com/Station-Manager/logging"
+	"github.com/Station-Manager/types"
 	gobug "go.bug.st/serial"
 )
 

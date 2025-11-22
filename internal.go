@@ -3,7 +3,7 @@ package serial
 import (
 	"errors"
 	"fmt"
-	"github.com/7Q-Station-Manager/types"
+	"github.com/Station-Manager/types"
 )
 
 // handleOpenError closes the port and joins any error from closing with the original error
