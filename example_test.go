@@ -3,14 +3,15 @@ package serial_test
 import (
 	"context"
 	"fmt"
+	"github.com/Station-Manager/types"
 	"time"
 
-	"serial"
+	"github.com/Station-Manager/serial"
 )
 
 func Example() {
-	cfg := serial.Config{
-		Name:     "/dev/ttyUSB0",
+	cfg := types.SerialConfig{
+		PortName: "/dev/ttyUSB0",
 		BaudRate: 9600,
 		DataBits: 8,
 	}

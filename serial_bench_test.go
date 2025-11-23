@@ -2,6 +2,7 @@ package serial
 
 import (
 	"context"
+	"github.com/Station-Manager/types"
 	"testing"
 	"time"
 )
@@ -9,8 +10,8 @@ import (
 // BenchmarkExec measures the cost of a typical Exec call against a mock port.
 func BenchmarkExec(b *testing.B) {
 	mp := newMockPort()
-	cfg := Config{
-		Name:          "mock",
+	cfg := types.SerialConfig{
+		PortName:      "mock",
 		BaudRate:      9600,
 		DataBits:      8,
 		LineDelimiter: ';',
@@ -38,8 +39,8 @@ func BenchmarkExec(b *testing.B) {
 // BenchmarkReaderLoop focuses on the readerLoop by feeding many small chunks.
 func BenchmarkReaderLoop(b *testing.B) {
 	mp := newMockPort()
-	cfg := Config{
-		Name:          "mock",
+	cfg := types.SerialConfig{
+		PortName:      "mock",
 		BaudRate:      9600,
 		DataBits:      8,
 		LineDelimiter: ';',

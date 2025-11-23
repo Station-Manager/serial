@@ -2,6 +2,7 @@ package serial
 
 import (
 	"context"
+	"github.com/Station-Manager/types"
 	"sync"
 	"testing"
 	"time"
@@ -48,8 +49,8 @@ func (m *mockPort) SetReadTimeout(d time.Duration) error { return nil }
 
 func TestExecSingleCommand(t *testing.T) {
 	mp := newMockPort()
-	cfg := Config{
-		Name:          "mock",
+	cfg := types.SerialConfig{
+		PortName:      "mock",
 		BaudRate:      9600,
 		DataBits:      8,
 		StopBits:      1,
@@ -82,8 +83,8 @@ func TestExecSingleCommand(t *testing.T) {
 
 func TestConcurrentWrites(t *testing.T) {
 	mp := newMockPort()
-	cfg := Config{
-		Name:          "mock",
+	cfg := types.SerialConfig{
+		PortName:      "mock",
 		BaudRate:      9600,
 		DataBits:      8,
 		StopBits:      1,
@@ -113,8 +114,8 @@ func TestConcurrentWrites(t *testing.T) {
 
 func TestReadResponseTimeout(t *testing.T) {
 	mp := newMockPort()
-	cfg := Config{
-		Name:          "mock",
+	cfg := types.SerialConfig{
+		PortName:      "mock",
 		BaudRate:      9600,
 		DataBits:      8,
 		LineDelimiter: ';',
@@ -137,8 +138,8 @@ func TestReadResponseTimeout(t *testing.T) {
 
 func TestCloseWhileReading(t *testing.T) {
 	mp := newMockPort()
-	cfg := Config{
-		Name:          "mock",
+	cfg := types.SerialConfig{
+		PortName:      "mock",
 		BaudRate:      9600,
 		DataBits:      8,
 		LineDelimiter: ';',
@@ -172,8 +173,8 @@ func TestCloseWhileReading(t *testing.T) {
 
 func TestCloseUnblocksRead(t *testing.T) {
 	mp := newMockPort()
-	cfg := Config{
-		Name:          "mock",
+	cfg := types.SerialConfig{
+		PortName:      "mock",
 		BaudRate:      9600,
 		DataBits:      8,
 		LineDelimiter: ';',
