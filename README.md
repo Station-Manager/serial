@@ -116,6 +116,10 @@ The `Errors()` channel yields at most one error and is closed when the
 reader goroutine exits. A graceful close (via `Close()`) may cause the
 channel to close without sending any error.
 
+You can also combine `Errors()` with higher-level supervision logic. For
+example, a long-running service might store the port in a struct and
+restart it when a non-nil error arrives on the error stream.
+
 ## Error structure
 
 This package consistently wraps errors using the
@@ -217,3 +221,40 @@ go test ./...
 
 go test -run='^$' -bench=. -benchmem ./...
 ```
+
+## Concurrency model
+
+The `serial` client is designed around a "one reader, many writers"
+model:
+
+- Multiple goroutines **may safely call** `WriteCommand` concurrently.
+  Writes are serialized on the underlying serial port via an internal
+  mutex.
+- Responses are produced by a single background reader goroutine and
+  must be consumed by **at most one goroutine** at a time via
+  `ReadResponse` or `Exec` on a given client.
+
+A typical pattern is:
+
+```go
+// one long-lived reader goroutine
+responses := make(chan string)
+
+go func() {
+    defer close(responses)
+    for {
+        line, err := port.ReadResponse(ctx)
+        if err != nil {
+            // check for serial.ErrClosed or context errors
+            break
+        }
+        responses <- line
+    }
+}()
+
+// elsewhere, multiple goroutines are free to call WriteCommand/Exec
+```
+
+If you need to fan out responses to multiple consumers, do so from your
+own reader goroutine or via an application-level dispatcher rather than
+calling `ReadResponse` concurrently from multiple goroutines.

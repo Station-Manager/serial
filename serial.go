@@ -16,17 +16,30 @@ const (
 )
 
 // Client is the high-level interface for sending CAT commands and
-// receiving responses over a serial port.
+// receiving responses over a serial port. It is safe for concurrent use
+// by multiple goroutines *for writes* via WriteCommand; all writes are
+// serialized internally. Reads are delivered on a single background
+// reader goroutine and must be consumed by at most one goroutine at a
+// time via ReadResponse/Exec.
 type Client interface {
 	// WriteCommand writes a single CAT command string to the port.
 	// Implementations will append the configured line delimiter if missing.
+	//
+	// WriteCommand is safe to call concurrently from multiple goroutines;
+	// the implementation will serialize writes on the underlying port.
 	WriteCommand(ctx context.Context, cmd string) error
 
 	// ReadResponse reads a single response line terminated by the
 	// configured delimiter.
+	//
+	// ReadResponse is not safe to call concurrently from multiple
+	// goroutines on the same Client. Use a single reader goroutine to
+	// consume responses, and fan them out if needed.
 	ReadResponse(ctx context.Context) (string, error)
 
 	// Exec is a convenience that writes a command then reads one response.
+	// Like ReadResponse, Exec must not be invoked concurrently by multiple
+	// goroutines on the same Client.
 	Exec(ctx context.Context, cmd string) (string, error)
 
 	// Errors returns a receive-only channel that will yield at most one
@@ -34,6 +47,17 @@ type Client interface {
 	// reader loop exits. Callers should not assume it will always produce
 	// a value; a graceful close may result in the channel closing without
 	// an error.
+	//
+	// A typical usage pattern is to run a small supervisor goroutine that
+	// watches the channel and triggers a reconnect or shutdown when a
+	// non-nil error is received:
+	//
+	//   go func() {
+	//       if err, ok := <-c.Errors(); ok && err != nil {
+	//           // log and trigger reconnect
+	//       }
+	//   }()
+	//
 	Errors() <-chan error
 
 	// Close closes the underlying port. It is safe to call multiple times.
@@ -41,6 +65,11 @@ type Client interface {
 }
 
 // Port is the concrete implementation of Client backed by go.bug.st/serial.
+//
+// Port implements the same concurrency guarantees as Client: it permits
+// multiple concurrent calls to WriteCommand, which are serialized on the
+// underlying SerialPort, but requires that ReadResponse and Exec are
+// used from at most one goroutine at a time.
 type Port struct {
 	port SerialPort
 
@@ -196,6 +225,20 @@ func (p *Port) Exec(ctx context.Context, cmd string) (string, error) {
 }
 
 // Errors implements Client.
+//
+// The returned channel will yield at most one non-timeout error from the
+// background reader loop (for example, a permanent I/O error or a dropped
+// over-long line) and is then closed when the reader exits. In the case of
+// a graceful Close, the channel may close without producing any value.
+//
+// Callers typically spawn a goroutine to supervise this channel and decide
+// whether to log the error, reconnect, or shut down:
+//
+//	go func() {
+//	    if err, ok := port.Errors(); ok && err != nil {
+//	        // handle terminal reader error
+//	    }
+//	}()
 func (p *Port) Errors() <-chan error {
 	return p.errCh
 }

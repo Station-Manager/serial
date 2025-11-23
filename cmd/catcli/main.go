@@ -29,6 +29,10 @@ func main() {
 
 	flag.Parse()
 
+	if delimiter == nil || len(*delimiter) == 0 {
+		log.Fatalf("invalid -delim flag: must be a non-empty string")
+	}
+
 	cfg := types.SerialConfig{
 		PortName:      *device,
 		BaudRate:      *baud,

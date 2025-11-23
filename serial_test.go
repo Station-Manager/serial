@@ -375,3 +375,87 @@ func TestOversizedLineEmitsErrorAndIsDropped(t *testing.T) {
 		t.Fatalf("expected error or timeout when reading after oversized line; got nil")
 	}
 }
+
+// TestOversizedLineEmitsErrorOnErrorsStream verifies that when the
+// readerLoop encounters a line longer than maxLineSize, it emits a
+// best-effort error on Errors() and does not panic or deadlock.
+func TestOversizedLineEmitsErrorOnErrorsStream(t *testing.T) {
+	o := newOverflowPort()
+	cfg := types.SerialConfig{
+		PortName:      "mock",
+		BaudRate:      9600,
+		DataBits:      8,
+		StopBits:      1,
+		LineDelimiter: ';',
+	}
+
+	c := newPort(o, cfg)
+
+	// Feed enough data to exceed maxLineSize (4096) without any delimiter.
+	bigChunk := make([]byte, maxLineSize+10)
+	for i := range bigChunk {
+		bigChunk[i] = 'A'
+	}
+	o.readCh <- bigChunk
+
+	// Close underlying channel so readerLoop eventually exits after
+	// processing the oversized line.
+	close(o.readCh)
+
+	select {
+	case err, ok := <-c.Errors():
+		if !ok {
+			t.Fatalf("expected error value before channel close for oversized line")
+		}
+		if err == nil {
+			t.Fatalf("expected non-nil error from Errors() for oversized line")
+		}
+	case <-time.After(500 * time.Millisecond):
+		t.Fatalf("timed out waiting for Errors() notification for oversized line")
+	}
+}
+
+// TestConcurrentReadResponseCalls documents and exercises the current
+// behavior when ReadResponse is called concurrently from multiple
+// goroutines. The implementation does not guarantee safe concurrent
+// reads, but this test ensures that, at minimum, the calls do not
+// deadlock or panic under moderate contention.
+func TestConcurrentReadResponseCalls(t *testing.T) {
+	mp := newMockPort()
+	cfg := types.SerialConfig{
+		PortName:      "mock",
+		BaudRate:      9600,
+		DataBits:      8,
+		StopBits:      1,
+		LineDelimiter: ';',
+	}
+
+	c := newPort(mp, cfg)
+
+	// Feed a handful of well-formed lines.
+	go func() {
+		for i := 0; i < 10; i++ {
+			mp.readCh <- []byte("RSP;")
+		}
+		close(mp.readCh)
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	var wg sync.WaitGroup
+	for i := 0; i < 5; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				_, err := c.ReadResponse(ctx)
+				if err != nil {
+					return
+				}
+			}
+		}()
+	}
+
+	wg.Wait()
+}
