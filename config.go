@@ -1,7 +1,7 @@
 package serial
 
 import (
-	"fmt"
+	"github.com/Station-Manager/errors"
 	"github.com/Station-Manager/types"
 
 	"go.bug.st/serial"
@@ -9,11 +9,12 @@ import (
 
 // validate checks the configuration for obvious issues.
 func validateConfig(cfg types.SerialConfig) error {
+	const op errors.Op = "serial.validateConfig"
 	if cfg.PortName == "" {
-		return fmt.Errorf("serial: missing port name")
+		return errors.New(op).Msg("serial: missing port name")
 	}
 	if cfg.BaudRate <= 0 {
-		return fmt.Errorf("serial: invalid baud rate %d", cfg.BaudRate)
+		return errors.New(op).Msgf("serial: invalid baud rate %d", cfg.BaudRate)
 	}
 	if cfg.DataBits == 0 {
 		cfg.DataBits = 8

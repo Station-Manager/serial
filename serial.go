@@ -2,28 +2,11 @@ package serial
 
 import (
 	"context"
+	"github.com/Station-Manager/errors"
 	"github.com/Station-Manager/types"
 	"go.bug.st/serial"
 	"sync"
 )
-
-// Config holds configuration for opening a serial port.
-//type Config struct {
-//	// Name is the path to the serial device, e.g. /dev/ttyUSB0.
-//	Name string
-//
-//	BaudRate int
-//	DataBits int
-//	StopBits serial.StopBits
-//	Parity   serial.Parity
-//
-//	// ReadTimeout is the underlying port read timeout.
-//	ReadTimeout time.Duration
-//
-//	// LineDelimiter is the byte used to frame responses.
-//	// If zero, '\r' is used. For many CAT implementations this is ';'.
-//	LineDelimiter byte
-//}
 
 // Client is the high-level interface for sending CAT commands and
 // receiving responses over a serial port.
@@ -59,10 +42,11 @@ type Port struct {
 	mu     sync.RWMutex
 }
 
-// Open opens a serial port with the given configuration.
+// Open initializes and opens a serial port based on the given SerialConfig. It returns a Port or an error if unsuccessful.
 func Open(cfg types.SerialConfig) (*Port, error) {
+	const op errors.Op = "serial.Open"
 	if err := validateConfig(cfg); err != nil {
-		return nil, err
+		return nil, errors.New(op).Err(err)
 	}
 
 	mode := &serial.Mode{
@@ -74,11 +58,14 @@ func Open(cfg types.SerialConfig) (*Port, error) {
 
 	p, err := serial.Open(cfg.PortName, mode)
 	if err != nil {
-		return nil, err
+		return nil, errors.New(op).Err(err)
 	}
 
 	if cfg.ReadTimeout > 0 {
-		_ = p.SetReadTimeout(cfg.ReadTimeout)
+		err = p.SetReadTimeout(cfg.ReadTimeout)
+		if err != nil {
+			return nil, errors.New(op).Err(err)
+		}
 	}
 
 	sp := &bugstPort{Port: p}
@@ -89,7 +76,7 @@ func Open(cfg types.SerialConfig) (*Port, error) {
 // newPort constructs a Port around an existing SerialPort.
 func newPort(sp SerialPort, cfg types.SerialConfig) *Port {
 	if cfg.LineDelimiter == 0 {
-		cfg.LineDelimiter = '\r'
+		cfg.LineDelimiter = '\r' // Default line delimiter, if not provided
 	}
 
 	po := &Port{
@@ -107,6 +94,11 @@ func newPort(sp SerialPort, cfg types.SerialConfig) *Port {
 
 // WriteCommand implements Client.
 func (p *Port) WriteCommand(ctx context.Context, cmd string) error {
+	const op errors.Op = "serial.WriteCommand"
+	if p == nil {
+		return errors.New(op).Msg(ErrMsgNilPort)
+	}
+
 	p.mu.RLock()
 	closed := p.closed
 	p.mu.RUnlock()
@@ -138,7 +130,7 @@ func (p *Port) WriteCommand(ctx context.Context, cmd string) error {
 
 		n, err := p.port.Write(data[written:])
 		if err != nil {
-			return err
+			return errors.New(op).Err(err)
 		}
 		written += n
 	}
@@ -148,6 +140,11 @@ func (p *Port) WriteCommand(ctx context.Context, cmd string) error {
 
 // ReadResponse implements Client.
 func (p *Port) ReadResponse(ctx context.Context) (string, error) {
+	const op errors.Op = "serial.ReadResponse"
+	if p == nil {
+		return "", errors.New(op).Msg(ErrMsgNilPort)
+	}
+
 	p.mu.RLock()
 	closed := p.closed
 	p.mu.RUnlock()
@@ -157,7 +154,7 @@ func (p *Port) ReadResponse(ctx context.Context) (string, error) {
 
 	select {
 	case <-ctx.Done():
-		return "", ctx.Err()
+		return "", errors.New(op).Err(ctx.Err())
 	case line, ok := <-p.responses:
 		if !ok {
 			return "", ErrClosed
@@ -168,14 +165,24 @@ func (p *Port) ReadResponse(ctx context.Context) (string, error) {
 
 // Exec implements Client.
 func (p *Port) Exec(ctx context.Context, cmd string) (string, error) {
+	const op errors.Op = "serial.Exec"
+	if p == nil {
+		return "", errors.New(op).Msg(ErrMsgNilPort)
+	}
+
 	if err := p.WriteCommand(ctx, cmd); err != nil {
-		return "", err
+		return "", errors.New(op).Err(err)
 	}
 	return p.ReadResponse(ctx)
 }
 
 // Close implements Client.
 func (p *Port) Close() error {
+	const op errors.Op = "serial.Close"
+	if p == nil {
+		return errors.New(op).Msg(ErrMsgNilPort)
+	}
+
 	p.mu.Lock()
 	if p.closed {
 		p.mu.Unlock()
@@ -187,7 +194,7 @@ func (p *Port) Close() error {
 
 	// Close the underlying port first to unblock any in-flight Read calls.
 	if err := p.port.Close(); err != nil {
-		return err
+		return errors.New(op).Err(err)
 	}
 
 	// Wait for the reader loop to finish cleanup.
@@ -211,6 +218,7 @@ func (p *Port) readerLoop() {
 		case <-p.closeCh:
 			return
 		default:
+			// No-op
 		}
 
 		n, err := p.port.Read(buf)
