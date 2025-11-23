@@ -2,6 +2,7 @@ package serial
 
 import (
 	"context"
+	stderr "errors"
 	"github.com/Station-Manager/errors"
 	"github.com/Station-Manager/types"
 	"go.bug.st/serial"
@@ -37,6 +38,10 @@ type Port struct {
 	responses chan string
 	closeCh   chan struct{}
 	doneCh    chan struct{}
+
+	// errCh carries a single terminal error from the reader loop, if any.
+	// It is closed when readerLoop exits.
+	errCh chan error
 
 	closed bool
 	mu     sync.RWMutex
@@ -85,6 +90,7 @@ func newPort(sp SerialPort, cfg types.SerialConfig) *Port {
 		responses: make(chan string, 64),
 		closeCh:   make(chan struct{}),
 		doneCh:    make(chan struct{}),
+		errCh:     make(chan error, 1),
 	}
 
 	go po.readerLoop()
@@ -223,6 +229,17 @@ func (p *Port) readerLoop() {
 
 		n, err := p.port.Read(buf)
 		if err != nil {
+			// Treat timeout-like errors as recoverable and keep looping.
+			var to interface{ Timeout() bool }
+			if stderr.As(err, &to) && to.Timeout() {
+				continue
+			}
+
+			// Non-timeout error: surface it to callers, then exit.
+			select {
+			case p.errCh <- err:
+			default:
+			}
 			return
 		}
 		if n == 0 {
