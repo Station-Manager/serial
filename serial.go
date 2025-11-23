@@ -9,6 +9,12 @@ import (
 	"sync"
 )
 
+const (
+	// responsesBufSize controls the capacity of the responses channel used to
+	// deliver framed lines from the background reader loop to callers.
+	responsesBufSize = 64
+)
+
 // Client is the high-level interface for sending CAT commands and
 // receiving responses over a serial port.
 type Client interface {
@@ -22,6 +28,13 @@ type Client interface {
 
 	// Exec is a convenience that writes a command then reads one response.
 	Exec(ctx context.Context, cmd string) (string, error)
+
+	// Errors returns a receive-only channel that will yield at most one
+	// terminal error from the reader loop, if any, and is closed when the
+	// reader loop exits. Callers should not assume it will always produce
+	// a value; a graceful close may result in the channel closing without
+	// an error.
+	Errors() <-chan error
 
 	// Close closes the underlying port. It is safe to call multiple times.
 	Close() error
@@ -50,31 +63,32 @@ type Port struct {
 // Open initializes and opens a serial port based on the given SerialConfig. It returns a Port or an error if unsuccessful.
 func Open(cfg types.SerialConfig) (*Port, error) {
 	const op errors.Op = "serial.Open"
-	if err := validateConfig(cfg); err != nil {
-		return nil, errors.New(op).Err(err)
-	}
 
-	mode := &serial.Mode{
-		BaudRate: cfg.BaudRate,
-		DataBits: cfg.DataBits,
-		StopBits: cfg.StopBits,
-		Parity:   cfg.Parity,
-	}
-
-	p, err := serial.Open(cfg.PortName, mode)
+	ncfg, err := validateConfig(cfg)
 	if err != nil {
 		return nil, errors.New(op).Err(err)
 	}
 
-	if cfg.ReadTimeout > 0 {
-		err = p.SetReadTimeout(cfg.ReadTimeout)
-		if err != nil {
+	mode := &serial.Mode{
+		BaudRate: ncfg.BaudRate,
+		DataBits: ncfg.DataBits,
+		StopBits: ncfg.StopBits,
+		Parity:   ncfg.Parity,
+	}
+
+	p, err := serial.Open(ncfg.PortName, mode)
+	if err != nil {
+		return nil, errors.New(op).Err(err)
+	}
+
+	if ncfg.ReadTimeout > 0 {
+		if err := p.SetReadTimeout(ncfg.ReadTimeout); err != nil {
 			return nil, errors.New(op).Err(err)
 		}
 	}
 
 	sp := &bugstPort{Port: p}
-	cl := newPort(sp, cfg)
+	cl := newPort(sp, ncfg)
 	return cl, nil
 }
 
@@ -87,10 +101,12 @@ func newPort(sp SerialPort, cfg types.SerialConfig) *Port {
 	po := &Port{
 		port:      sp,
 		cfg:       cfg,
-		responses: make(chan string, 64),
+		responses: make(chan string, responsesBufSize),
 		closeCh:   make(chan struct{}),
 		doneCh:    make(chan struct{}),
-		errCh:     make(chan error, 1),
+		// errCh is buffered by one so the reader loop can report a terminal
+		// error without blocking; it is closed when readerLoop exits.
+		errCh: make(chan error, 1),
 	}
 
 	go po.readerLoop()
@@ -101,15 +117,12 @@ func newPort(sp SerialPort, cfg types.SerialConfig) *Port {
 // WriteCommand implements Client.
 func (p *Port) WriteCommand(ctx context.Context, cmd string) error {
 	const op errors.Op = "serial.WriteCommand"
-	if p == nil {
-		return errors.New(op).Msg(ErrMsgNilPort)
-	}
 
 	p.mu.RLock()
 	closed := p.closed
 	p.mu.RUnlock()
 	if closed {
-		return ErrClosed
+		return errors.New(op).Err(ErrClosed)
 	}
 
 	if len(cmd) == 0 {
@@ -130,13 +143,19 @@ func (p *Port) WriteCommand(ctx context.Context, cmd string) error {
 	for written < len(data) {
 		select {
 		case <-ctx.Done():
-			return ctx.Err()
+			return errors.New(op).Err(ctx.Err())
 		default:
 		}
 
 		n, err := p.port.Write(data[written:])
 		if err != nil {
 			return errors.New(op).Err(err)
+		}
+		if n == 0 {
+			// Protect against misbehaving SerialPort implementations that
+			// report success but do not advance the write offset, which
+			// would otherwise cause this loop to spin indefinitely.
+			return errors.New(op).Msg("serial: write returned 0 bytes without error")
 		}
 		written += n
 	}
@@ -147,15 +166,12 @@ func (p *Port) WriteCommand(ctx context.Context, cmd string) error {
 // ReadResponse implements Client.
 func (p *Port) ReadResponse(ctx context.Context) (string, error) {
 	const op errors.Op = "serial.ReadResponse"
-	if p == nil {
-		return "", errors.New(op).Msg(ErrMsgNilPort)
-	}
 
 	p.mu.RLock()
 	closed := p.closed
 	p.mu.RUnlock()
 	if closed {
-		return "", ErrClosed
+		return "", errors.New(op).Err(ErrClosed)
 	}
 
 	select {
@@ -163,7 +179,7 @@ func (p *Port) ReadResponse(ctx context.Context) (string, error) {
 		return "", errors.New(op).Err(ctx.Err())
 	case line, ok := <-p.responses:
 		if !ok {
-			return "", ErrClosed
+			return "", errors.New(op).Err(ErrClosed)
 		}
 		return line, nil
 	}
@@ -172,9 +188,6 @@ func (p *Port) ReadResponse(ctx context.Context) (string, error) {
 // Exec implements Client.
 func (p *Port) Exec(ctx context.Context, cmd string) (string, error) {
 	const op errors.Op = "serial.Exec"
-	if p == nil {
-		return "", errors.New(op).Msg(ErrMsgNilPort)
-	}
 
 	if err := p.WriteCommand(ctx, cmd); err != nil {
 		return "", errors.New(op).Err(err)
@@ -182,12 +195,14 @@ func (p *Port) Exec(ctx context.Context, cmd string) (string, error) {
 	return p.ReadResponse(ctx)
 }
 
+// Errors implements Client.
+func (p *Port) Errors() <-chan error {
+	return p.errCh
+}
+
 // Close implements Client.
 func (p *Port) Close() error {
 	const op errors.Op = "serial.Close"
-	if p == nil {
-		return errors.New(op).Msg(ErrMsgNilPort)
-	}
 
 	p.mu.Lock()
 	if p.closed {
@@ -213,6 +228,7 @@ func (p *Port) Close() error {
 func (p *Port) readerLoop() {
 	defer close(p.doneCh)
 	defer close(p.responses)
+	defer close(p.errCh)
 
 	buf := getReadBuf()
 	defer putReadBuf(buf)
@@ -237,7 +253,7 @@ func (p *Port) readerLoop() {
 
 			// Non-timeout error: surface it to callers, then exit.
 			select {
-			case p.errCh <- err:
+			case p.errCh <- errors.New(errors.Op("serial.readerLoop")).Err(err):
 			default:
 			}
 			return
@@ -252,8 +268,13 @@ func (p *Port) readerLoop() {
 			if idx == -1 {
 				lineBuf = append(lineBuf, chunk...)
 				if len(lineBuf) > maxLineSize {
-					// drop overly long lines
+					// drop overly long lines and notify via Errors() on a
+					// best-effort basis without terminating the loop.
 					lineBuf = lineBuf[:0]
+					select {
+					case p.errCh <- errors.New(errors.Op("serial.readerLoop")).Msg("serial: dropped line exceeding maxLineSize (4096 bytes)"):
+					default:
+					}
 				}
 				break
 			}

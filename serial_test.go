@@ -13,6 +13,12 @@ type mockPort struct {
 	writeMu sync.Mutex
 	writes  [][]byte
 	closed  bool
+
+	mu sync.Mutex
+	// errToReturn, if non-nil, will be returned on the next Read call
+	// instead of data from readCh. This allows exercising error paths
+	// from the reader loop.
+	errToReturn error
 }
 
 func newMockPort() *mockPort {
@@ -20,6 +26,15 @@ func newMockPort() *mockPort {
 }
 
 func (m *mockPort) Read(p []byte) (int, error) {
+	m.mu.Lock()
+	if m.errToReturn != nil {
+		err := m.errToReturn
+		m.errToReturn = nil
+		m.mu.Unlock()
+		return 0, err
+	}
+	m.mu.Unlock()
+
 	b, ok := <-m.readCh
 	if !ok {
 		return 0, context.Canceled
@@ -203,5 +218,160 @@ func TestCloseUnblocksRead(t *testing.T) {
 		// ok
 	case <-time.After(100 * time.Millisecond):
 		t.Fatalf("ReadResponse did not unblock after Close")
+	}
+}
+
+// TestErrorsStreamClosesOnCloseWithoutError verifies that the Errors
+// channel is closed when the port is closed without a terminal read
+// error, so callers can reliably range over it.
+func TestErrorsStreamClosesOnCloseWithoutError(t *testing.T) {
+	mp := newMockPort()
+	cfg := types.SerialConfig{
+		PortName:      "mock",
+		BaudRate:      9600,
+		DataBits:      8,
+		StopBits:      1,
+		LineDelimiter: ';',
+	}
+
+	c := newPort(mp, cfg)
+
+	if err := c.Close(); err != nil {
+		t.Fatalf("Close error: %v", err)
+	}
+
+	select {
+	case _, ok := <-c.Errors():
+		if ok {
+			t.Fatalf("expected Errors() channel to be closed without value after Close")
+		}
+	case <-time.After(500 * time.Millisecond):
+		t.Fatalf("timed out waiting for Errors() channel to close after Close")
+	}
+}
+
+func TestValidateConfigDefaultsAndSuccess(t *testing.T) {
+	in := types.SerialConfig{
+		PortName: "ttyS0",
+		BaudRate: 9600,
+		// DataBits, StopBits, Parity left at zero to exercise defaults.
+	}
+
+	got, err := validateConfig(in)
+	if err != nil {
+		t.Fatalf("validateConfig unexpected error: %v", err)
+	}
+
+	if got.PortName != "ttyS0" {
+		t.Fatalf("expected PortName to be %q, got %q", "ttyS0", got.PortName)
+	}
+	if got.BaudRate != 9600 {
+		t.Fatalf("expected BaudRate to be 9600, got %d", got.BaudRate)
+	}
+	if got.DataBits != 8 {
+		t.Fatalf("expected DataBits default of 8, got %d", got.DataBits)
+	}
+}
+
+func TestValidateConfigFailures(t *testing.T) {
+	tests := []struct {
+		name string
+		cfg  types.SerialConfig
+	}{
+		{"missing port name", types.SerialConfig{BaudRate: 9600}},
+		{"invalid baud", types.SerialConfig{PortName: "ttyS0", BaudRate: 0}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := validateConfig(tt.cfg)
+			if err == nil {
+				t.Fatalf("expected error for %s, got nil", tt.name)
+			}
+		})
+	}
+}
+
+// zeroWritePort is a SerialPort implementation that always reports
+// success but writes 0 bytes, which should be treated as an error by
+// WriteCommand to avoid spinning indefinitely.
+type zeroWritePort struct{}
+
+func (z *zeroWritePort) Read(p []byte) (int, error)           { return 0, context.Canceled }
+func (z *zeroWritePort) Write(p []byte) (int, error)          { return 0, nil }
+func (z *zeroWritePort) Close() error                         { return nil }
+func (z *zeroWritePort) SetReadTimeout(d time.Duration) error { return nil }
+
+func TestWriteCommandZeroWriteIsError(t *testing.T) {
+	cfg := types.SerialConfig{
+		PortName:      "mock",
+		BaudRate:      9600,
+		DataBits:      8,
+		StopBits:      1,
+		LineDelimiter: '\r',
+	}
+
+	c := newPort(&zeroWritePort{}, cfg)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+
+	if err := c.WriteCommand(ctx, "CMD"); err == nil {
+		t.Fatalf("expected error when underlying Write returns 0 bytes, got nil")
+	}
+}
+
+// overflowPort feeds a single line that exceeds maxLineSize by sending
+// data in chunks without any delimiter so that readerLoop overflows the
+// internal line buffer and drops the line.
+type overflowPort struct {
+	mockPort
+}
+
+func newOverflowPort() *overflowPort {
+	return &overflowPort{mockPort{readCh: make(chan []byte, 16)}}
+}
+
+func TestOversizedLineEmitsErrorAndIsDropped(t *testing.T) {
+	o := newOverflowPort()
+	cfg := types.SerialConfig{
+		PortName:      "mock",
+		BaudRate:      9600,
+		DataBits:      8,
+		StopBits:      1,
+		LineDelimiter: ';',
+	}
+
+	c := newPort(o, cfg)
+
+	// Feed enough data to exceed maxLineSize (4096) without any delimiter.
+	bigChunk := make([]byte, maxLineSize+10)
+	for i := range bigChunk {
+		bigChunk[i] = 'A'
+	}
+	o.readCh <- bigChunk
+
+	// Close the underlying mock so readerLoop eventually stops reading.
+	close(o.readCh)
+
+	// We expect one best-effort error on Errors(), and no line delivered.
+	select {
+	case err, ok := <-c.Errors():
+		if !ok {
+			t.Fatalf("expected error value before channel close")
+		}
+		if err == nil {
+			t.Fatalf("expected non-nil error from Errors() for oversized line")
+		}
+	case <-time.After(500 * time.Millisecond):
+		t.Fatalf("timed out waiting for error from Errors() for oversized line")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+
+	// There should be no response line because the oversized line is dropped.
+	if _, err := c.ReadResponse(ctx); err == nil {
+		t.Fatalf("expected error or timeout when reading after oversized line; got nil")
 	}
 }

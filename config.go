@@ -7,14 +7,15 @@ import (
 	"go.bug.st/serial"
 )
 
-// validate checks the configuration for obvious issues.
-func validateConfig(cfg types.SerialConfig) error {
+// validateConfig checks the configuration for obvious issues and returns a
+// normalized copy with sensible defaults applied.
+func validateConfig(cfg types.SerialConfig) (types.SerialConfig, error) {
 	const op errors.Op = "serial.validateConfig"
 	if cfg.PortName == "" {
-		return errors.New(op).Msg("serial: missing port name")
+		return cfg, errors.New(op).Msg("serial: missing port name")
 	}
 	if cfg.BaudRate <= 0 {
-		return errors.New(op).Msgf("serial: invalid baud rate %d", cfg.BaudRate)
+		return cfg, errors.New(op).Msgf("serial: invalid baud rate %d", cfg.BaudRate)
 	}
 	if cfg.DataBits == 0 {
 		cfg.DataBits = 8
@@ -26,5 +27,5 @@ func validateConfig(cfg types.SerialConfig) error {
 	if cfg.Parity == 0 {
 		cfg.Parity = serial.NoParity
 	}
-	return nil
+	return cfg, nil
 }
