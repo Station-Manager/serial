@@ -13,7 +13,7 @@ func validateConfig(cfg types.SerialConfig) error {
 		return fmt.Errorf("serial: missing port name")
 	}
 	if cfg.BaudRate <= 0 {
-		return fmt.Errorf("serial: invalid baud rate %d", c.BaudRate)
+		return fmt.Errorf("serial: invalid baud rate %d", cfg.BaudRate)
 	}
 	if cfg.DataBits == 0 {
 		cfg.DataBits = 8
