@@ -459,3 +459,312 @@ func TestConcurrentReadResponseCalls(t *testing.T) {
 
 	wg.Wait()
 }
+
+func TestWriteCommandBytesAppendsDelimiter(t *testing.T) {
+	mp := newMockPort()
+	cfg := types.SerialConfig{
+		PortName:      "mock",
+		BaudRate:      9600,
+		DataBits:      8,
+		StopBits:      1,
+		LineDelimiter: '\r',
+	}
+
+	c := newPort(mp, cfg)
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	if err := c.WriteCommandBytes(ctx, []byte("FA")); err != nil {
+		t.Fatalf("WriteCommandBytes error: %v", err)
+	}
+
+	if len(mp.writes) != 1 {
+		t.Fatalf("expected 1 write, got %d", len(mp.writes))
+	}
+	if string(mp.writes[0]) != "FA\r" {
+		t.Fatalf("unexpected written data: %q", string(mp.writes[0]))
+	}
+}
+
+func TestWriteCommandBytesPreservesExistingDelimiter(t *testing.T) {
+	mp := newMockPort()
+	cfg := types.SerialConfig{
+		PortName:      "mock",
+		BaudRate:      9600,
+		DataBits:      8,
+		StopBits:      1,
+		LineDelimiter: '\r',
+	}
+
+	c := newPort(mp, cfg)
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	if err := c.WriteCommandBytes(ctx, []byte("FA\r")); err != nil {
+		t.Fatalf("WriteCommandBytes error: %v", err)
+	}
+
+	if len(mp.writes) != 1 {
+		t.Fatalf("expected 1 write, got %d", len(mp.writes))
+	}
+	if string(mp.writes[0]) != "FA\r" {
+		t.Fatalf("unexpected written data: %q", string(mp.writes[0]))
+	}
+}
+
+func TestWriteCommandBytesEmptyNoop(t *testing.T) {
+	mp := newMockPort()
+	cfg := types.SerialConfig{
+		PortName:      "mock",
+		BaudRate:      9600,
+		DataBits:      8,
+		StopBits:      1,
+		LineDelimiter: '\r',
+	}
+
+	c := newPort(mp, cfg)
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	if err := c.WriteCommandBytes(ctx, nil); err != nil {
+		t.Fatalf("WriteCommandBytes(nil) error: %v", err)
+	}
+	if err := c.WriteCommandBytes(ctx, []byte{}); err != nil {
+		t.Fatalf("WriteCommandBytes(empty) error: %v", err)
+	}
+
+	if len(mp.writes) != 0 {
+		t.Fatalf("expected no writes for empty commands, got %d", len(mp.writes))
+	}
+}
+
+func TestReadResponseBytesReturnsBytesWithoutDelimiter(t *testing.T) {
+	mp := newMockPort()
+	cfg := types.SerialConfig{
+		PortName:      "mock",
+		BaudRate:      9600,
+		DataBits:      8,
+		StopBits:      1,
+		LineDelimiter: '\n',
+	}
+
+	c := newPort(mp, cfg)
+
+	// simulate a single response line terminated by '\n'
+	mp.readCh <- []byte("OK\n")
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	resp, err := c.ReadResponseBytes(ctx)
+	if err != nil {
+		t.Fatalf("ReadResponseBytes error: %v", err)
+	}
+	if string(resp) != "OK" {
+		t.Fatalf("expected response 'OK', got %q", string(resp))
+	}
+}
+
+func TestReadResponseBytesWithChunkedInput(t *testing.T) {
+	mp := newMockPort()
+	cfg := types.SerialConfig{
+		PortName:      "mock",
+		BaudRate:      9600,
+		DataBits:      8,
+		StopBits:      1,
+		LineDelimiter: ';',
+	}
+
+	c := newPort(mp, cfg)
+
+	// Simulate fragmented input: "ABCD;EF;" split over multiple reads.
+	mp.readCh <- []byte("AB")
+	mp.readCh <- []byte("CD;EF;")
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	resp1, err := c.ReadResponseBytes(ctx)
+	if err != nil {
+		t.Fatalf("first ReadResponseBytes error: %v", err)
+	}
+	if string(resp1) != "ABCD" {
+		t.Fatalf("expected first response 'ABCD', got %q", string(resp1))
+	}
+
+	resp2, err := c.ReadResponseBytes(ctx)
+	if err != nil {
+		t.Fatalf("second ReadResponseBytes error: %v", err)
+	}
+	if string(resp2) != "EF" {
+		t.Fatalf("expected second response 'EF', got %q", string(resp2))
+	}
+}
+
+func TestExecBytesRoundTripBinaryPayload(t *testing.T) {
+	mp := newMockPort()
+	cfg := types.SerialConfig{
+		PortName:      "mock",
+		BaudRate:      9600,
+		DataBits:      8,
+		StopBits:      1,
+		LineDelimiter: '\r',
+	}
+
+	c := newPort(mp, cfg)
+
+	cmd := []byte{0x00, 0x01, 0xFF}
+	// Response includes delimiter, which should be stripped by ReadResponseBytes.
+	mp.readCh <- []byte{0x10, 0x20, '\r'}
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	resp, err := c.ExecBytes(ctx, cmd)
+	if err != nil {
+		t.Fatalf("ExecBytes error: %v", err)
+	}
+
+	if len(mp.writes) != 1 {
+		t.Fatalf("expected 1 write, got %d", len(mp.writes))
+	}
+	expectedWritten := append(append([]byte{}, cmd...), '\r')
+	if string(mp.writes[0]) != string(expectedWritten) {
+		t.Fatalf("unexpected written data: %v, expected %v", mp.writes[0], expectedWritten)
+	}
+
+	expectedResp := []byte{0x10, 0x20}
+	if string(resp) != string(expectedResp) {
+		t.Fatalf("unexpected response data: %v, expected %v", resp, expectedResp)
+	}
+}
+
+func TestWriteCommandBytesContextCancelledBeforeWrite(t *testing.T) {
+	mp := newMockPort()
+	cfg := types.SerialConfig{
+		PortName:      "mock",
+		BaudRate:      9600,
+		DataBits:      8,
+		StopBits:      1,
+		LineDelimiter: '\r',
+	}
+
+	c := newPort(mp, cfg)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	if err := c.WriteCommandBytes(ctx, []byte("CMD")); err == nil {
+		t.Fatalf("expected error when context is cancelled before write, got nil")
+	}
+	if len(mp.writes) != 0 {
+		t.Fatalf("expected no writes when context is cancelled, got %d", len(mp.writes))
+	}
+}
+
+func TestReadResponseBytesContextTimeoutWhileWaiting(t *testing.T) {
+	mp := newMockPort()
+	cfg := types.SerialConfig{
+		PortName:      "mock",
+		BaudRate:      9600,
+		DataBits:      8,
+		StopBits:      1,
+		LineDelimiter: ';',
+	}
+
+	c := newPort(mp, cfg)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	defer cancel()
+
+	start := time.Now()
+	_, err := c.ReadResponseBytes(ctx)
+	if err == nil {
+		t.Fatalf("expected timeout error from ReadResponseBytes, got nil")
+	}
+	if time.Since(start) < 10*time.Millisecond {
+		t.Fatalf("ReadResponseBytes returned too early for timeout")
+	}
+}
+
+func TestExecBytesAfterCloseReturnsErrClosed(t *testing.T) {
+	mp := newMockPort()
+	cfg := types.SerialConfig{
+		PortName:      "mock",
+		BaudRate:      9600,
+		DataBits:      8,
+		StopBits:      1,
+		LineDelimiter: '\r',
+	}
+
+	c := newPort(mp, cfg)
+
+	if err := c.Close(); err != nil {
+		t.Fatalf("Close error: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	if _, err := c.ExecBytes(ctx, []byte("CMD")); err == nil {
+		t.Fatalf("expected error from ExecBytes after Close, got nil")
+	}
+}
+
+func TestReadResponseBytesAfterCloseReturnsErrClosed(t *testing.T) {
+	mp := newMockPort()
+	cfg := types.SerialConfig{
+		PortName:      "mock",
+		BaudRate:      9600,
+		DataBits:      8,
+		StopBits:      1,
+		LineDelimiter: ';',
+	}
+
+	c := newPort(mp, cfg)
+
+	if err := c.Close(); err != nil {
+		t.Fatalf("Close error: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	if _, err := c.ReadResponseBytes(ctx); err == nil {
+		t.Fatalf("expected error from ReadResponseBytes after Close, got nil")
+	}
+}
+
+func TestWriteCommandBytesConcurrentWrites(t *testing.T) {
+	mp := newMockPort()
+	cfg := types.SerialConfig{
+		PortName:      "mock",
+		BaudRate:      9600,
+		DataBits:      8,
+		StopBits:      1,
+		LineDelimiter: '\r',
+	}
+
+	c := newPort(mp, cfg)
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	var wg sync.WaitGroup
+	for i := 0; i < 10; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_ = c.WriteCommandBytes(ctx, []byte("CMD"))
+		}()
+	}
+
+	wg.Wait()
+
+	if len(mp.writes) != 10 {
+		t.Fatalf("expected 10 writes, got %d", len(mp.writes))
+	}
+}

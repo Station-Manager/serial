@@ -10,6 +10,107 @@ It focuses on simple, line-oriented **string** I/O, with:
 - A small buffer pool for read buffers to reduce allocations.
 - A tiny CLI tool (`cmd/catcli`) for manual CAT interaction.
 
+## Byte vs string APIs
+
+The client exposes both string- and byte-oriented methods:
+
+- String helpers:
+  - `WriteCommand(ctx, cmd string) error`
+  - `ReadResponse(ctx) (string, error)`
+  - `Exec(ctx, cmd string) (string, error)`
+
+- Byte primitives:
+  - `WriteCommandBytes(ctx, cmd []byte) error`
+  - `ReadResponseBytes(ctx) ([]byte, error)`
+  - `ExecBytes(ctx, cmd []byte) ([]byte, error)`
+
+The string APIs are thin convenience wrappers over the byte APIs:
+
+- `WriteCommand` calls `WriteCommandBytes([]byte(cmd))`.
+- `ReadResponse` calls `ReadResponseBytes` and converts the bytes to `string` without validating UTF-8.
+- `Exec` calls `ExecBytes` and converts the returned bytes to `string`.
+
+For new code—especially CAT handling where you want to parse prefixes and fields efficiently—prefer the **byte-oriented APIs**. They avoid unnecessary string allocations and make it straightforward to work with binary or non-UTF-8 payloads.
+
+### Line delimiter behavior
+
+All write methods share the same delimiter semantics:
+
+- The configured `SerialConfig.LineDelimiter` (default: `\r`) is automatically appended if the last byte of the command is not already the delimiter.
+- If the command already ends with the delimiter, it is not duplicated.
+
+On reads:
+
+- The background reader loop splits incoming data by the configured `LineDelimiter`.
+- `ReadResponseBytes` returns the bytes **excluding** the delimiter.
+- `ReadResponse` simply converts those bytes to a `string`.
+
+This means each call to `ReadResponseBytes` corresponds to a single framed line from the device.
+
+### Context and concurrency
+
+All public methods accept a `context.Context`:
+
+- **Write side**
+  - `WriteCommandBytes` (and `WriteCommand`) check `ctx.Done()` while writing.
+  - If the context is cancelled or times out, they return an error wrapping `ctx.Err()`.
+  - Multiple goroutines may safely call write methods concurrently; writes are serialized internally.
+
+- **Read side**
+  - `ReadResponseBytes` (and `ReadResponse`) block until a framed line is available or the context is done.
+  - If the context is cancelled or times out before a line arrives, they return an error wrapping `ctx.Err()`.
+  - Reads must not be performed concurrently from multiple goroutines on the same client; use a single reader goroutine and fan out responses yourself if needed.
+
+`ExecBytes` and `Exec` are simple compositions:
+
+- `ExecBytes` = `WriteCommandBytes` then `ReadResponseBytes` under the same context.
+- `Exec` does the same and converts the response to a `string`.
+
+### Example: using byte APIs for CAT
+
+```go
+cfg := types.SerialConfig{
+    PortName:      "/dev/ttyUSB0",
+    BaudRate:      9600,
+    DataBits:      8,
+    StopBits:      1,
+    LineDelimiter: '\r',
+}
+
+port, err := serial.Open(cfg)
+if err != nil {
+    log.Fatal(err)
+}
+defer port.Close()
+
+ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+defer cancel()
+
+// Send a CAT command as bytes (delimiter auto-appended if missing).
+cmd := []byte("FA") // e.g. read VFO A frequency
+if err := port.WriteCommandBytes(ctx, cmd); err != nil {
+    log.Fatal(err)
+}
+
+// Read the response bytes (without delimiter) and hand them to a CAT parser.
+resp, err := port.ReadResponseBytes(ctx)
+if err != nil {
+    log.Fatal(err)
+}
+
+handleCATLine(resp) // your code: parse prefix, update state, etc.
+```
+
+You can also use `ExecBytes` when you only need a single request/response pair:
+
+```go
+resp, err := port.ExecBytes(ctx, []byte("FA"))
+if err != nil {
+    log.Fatal(err)
+}
+handleCATLine(resp)
+```
+
 ## Installation
 
 ```sh
