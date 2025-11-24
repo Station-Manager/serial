@@ -12,9 +12,9 @@ tasks:
     desc: "Development build of the {{.MODULE_NAME}} module"
     cmds:
       - echo "Building {{.MODULE_NAME}} module..."
-      - go mod download
-      - go mod verify
+      - go get -u
       - go mod tidy
+      - go mod verify
       - go vet ./...
       - go build ./...
       - go test -race -run Test ./...

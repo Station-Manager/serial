@@ -1,7 +1,7 @@
 github.com/Station-Manager/errors v0.0.5 h1:3bOHV4fRu2u0YYwODBBB+PseETWco4Ijm5F3mJ0ljGM=
 github.com/Station-Manager/errors v0.0.5/go.mod h1:yedsGkIKLyDEUhkm7VrjwE2Qq6Jdlq0MpwEjdDhBwh0=
-github.com/Station-Manager/types v0.0.22 h1:Ph26dbYoD4+NxFiiTd6zaezMDVJO8Dc9OOPo55+oBTg=
-github.com/Station-Manager/types v0.0.22/go.mod h1:b6JU4edbW+yGlXKIwWjqS7ffDjH6a8l/z6k5/H5w4kM=
+github.com/Station-Manager/types v0.0.23 h1:EYu/slPL0aYMf5bCbAe61VuwBzKEtIcfvgxs1jFvbPQ=
+github.com/Station-Manager/types v0.0.23/go.mod h1:b6JU4edbW+yGlXKIwWjqS7ffDjH6a8l/z6k5/H5w4kM=
 github.com/creack/goselect v0.1.3 h1:MaGNMclRo7P2Jl21hBpR1Cn33ITSbKP6E49RtfblLKc=
 github.com/creack/goselect v0.1.3/go.mod h1:a/NhLweNvqIYMuxcMOuWY516Cimucms3DglDzQP3hKY=
 github.com/davecgh/go-spew v1.1.1 h1:vj9j/u1bqnvCEfJOwUhtlOARqs3+rkHYY13jYWTU97c=
