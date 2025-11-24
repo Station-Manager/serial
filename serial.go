@@ -140,8 +140,8 @@ func Open(cfg types.SerialConfig) (*Port, error) {
 		return nil, errors.New(op).Err(err)
 	}
 
-	if ncfg.ReadTimeout > 0 {
-		if err := p.SetReadTimeout(ncfg.ReadTimeout); err != nil {
+	if ncfg.ReadTimeoutMS > 0 {
+		if err = p.SetReadTimeout(ncfg.ReadTimeoutMS); err != nil {
 			return nil, errors.New(op).Err(err)
 		}
 	}
