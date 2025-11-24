@@ -30,17 +30,46 @@ type Client interface {
 	WriteCommand(ctx context.Context, cmd string) error
 
 	// ReadResponse reads a single response line terminated by the
-	// configured delimiter.
+	// configured delimiter and returns it as a string. This is a
+	// convenience wrapper over ReadResponseBytes and interprets the
+	// response bytes as UTF-8 text without validation.
 	//
 	// ReadResponse is not safe to call concurrently from multiple
 	// goroutines on the same Client. Use a single reader goroutine to
 	// consume responses, and fan them out if needed.
 	ReadResponse(ctx context.Context) (string, error)
 
-	// Exec is a convenience that writes a command then reads one response.
+	// Exec is a convenience that writes a command then reads one response
+	// as a string. It wraps ExecBytes and converts the returned bytes to a
+	// string without validating UTF-8.
+	//
 	// Like ReadResponse, Exec must not be invoked concurrently by multiple
 	// goroutines on the same Client.
 	Exec(ctx context.Context, cmd string) (string, error)
+
+	// WriteCommandBytes writes a single CAT command as an opaque byte
+	// slice to the port. Implementations will append the configured line
+	// delimiter if it is not already present as the final byte.
+	//
+	// WriteCommandBytes is safe to call concurrently from multiple
+	// goroutines; the implementation will serialize writes on the
+	// underlying port.
+	WriteCommandBytes(ctx context.Context, cmd []byte) error
+
+	// ReadResponseBytes reads a single response line terminated by the
+	// configured delimiter and returns the raw bytes excluding the
+	// delimiter.
+	//
+	// ReadResponseBytes is not safe to call concurrently from multiple
+	// goroutines on the same Client.
+	ReadResponseBytes(ctx context.Context) ([]byte, error)
+
+	// ExecBytes is a convenience that writes a command as bytes then reads
+	// one response as bytes.
+	//
+	// Like ReadResponseBytes, ExecBytes must not be invoked concurrently
+	// by multiple goroutines on the same Client.
+	ExecBytes(ctx context.Context, cmd []byte) ([]byte, error)
 
 	// Errors returns a receive-only channel that will yield at most one
 	// terminal error from the reader loop, if any, and is closed when the
@@ -67,9 +96,10 @@ type Client interface {
 // Port is the concrete implementation of Client backed by go.bug.st/serial.
 //
 // Port implements the same concurrency guarantees as Client: it permits
-// multiple concurrent calls to WriteCommand, which are serialized on the
-// underlying SerialPort, but requires that ReadResponse and Exec are
-// used from at most one goroutine at a time.
+// multiple concurrent calls to WriteCommand/WriteCommandBytes, which are
+// serialized on the underlying SerialPort, but requires that
+// ReadResponse/ReadResponseBytes and Exec/ExecBytes are used from at most
+// one goroutine at a time.
 type Port struct {
 	port SerialPort
 
@@ -77,13 +107,13 @@ type Port struct {
 
 	writeMu sync.Mutex
 
-	responses chan string
+	responses chan []byte
 	closeCh   chan struct{}
 	doneCh    chan struct{}
 
 	// errCh carries a single terminal error from the reader loop, if any.
 	// It is closed when readerLoop exits.
-	errCh chan error
+	ErrCh chan error
 
 	closed bool
 	mu     sync.RWMutex
@@ -130,12 +160,12 @@ func newPort(sp SerialPort, cfg types.SerialConfig) *Port {
 	po := &Port{
 		port:      sp,
 		cfg:       cfg,
-		responses: make(chan string, responsesBufSize),
+		responses: make(chan []byte, responsesBufSize),
 		closeCh:   make(chan struct{}),
 		doneCh:    make(chan struct{}),
-		// errCh is buffered by one so the reader loop can report a terminal
+		// ErrCh is buffered by one so the reader loop can report a terminal
 		// error without blocking; it is closed when readerLoop exits.
-		errCh: make(chan error, 1),
+		ErrCh: make(chan error, 1),
 	}
 
 	go po.readerLoop()
@@ -143,8 +173,16 @@ func newPort(sp SerialPort, cfg types.SerialConfig) *Port {
 	return po
 }
 
-// WriteCommand implements Client.
+// WriteCommand implements Client, delegating to WriteCommandBytes.
 func (p *Port) WriteCommand(ctx context.Context, cmd string) error {
+	if len(cmd) == 0 {
+		return nil
+	}
+	return p.WriteCommandBytes(ctx, []byte(cmd))
+}
+
+// WriteCommandBytes implements the byte-oriented write for Client.
+func (p *Port) WriteCommandBytes(ctx context.Context, cmd []byte) error {
 	const op errors.Op = "serial.WriteCommand"
 
 	p.mu.RLock()
@@ -160,23 +198,21 @@ func (p *Port) WriteCommand(ctx context.Context, cmd string) error {
 
 	// ensure delimiter
 	if cmd[len(cmd)-1] != p.cfg.LineDelimiter {
-		cmd = cmd + string(p.cfg.LineDelimiter)
+		cmd = append(cmd, p.cfg.LineDelimiter)
 	}
-
-	data := []byte(cmd)
 
 	p.writeMu.Lock()
 	defer p.writeMu.Unlock()
 
 	written := 0
-	for written < len(data) {
+	for written < len(cmd) {
 		select {
 		case <-ctx.Done():
 			return errors.New(op).Err(ctx.Err())
 		default:
 		}
 
-		n, err := p.port.Write(data[written:])
+		n, err := p.port.Write(cmd[written:])
 		if err != nil {
 			return errors.New(op).Err(err)
 		}
@@ -192,36 +228,60 @@ func (p *Port) WriteCommand(ctx context.Context, cmd string) error {
 	return nil
 }
 
-// ReadResponse implements Client.
+// ReadResponse implements Client, delegating to ReadResponseBytes and
+// converting the returned bytes to a string.
 func (p *Port) ReadResponse(ctx context.Context) (string, error) {
 	const op errors.Op = "serial.ReadResponse"
+
+	b, err := p.ReadResponseBytes(ctx)
+	if err != nil {
+		return "", errors.New(op).Err(err)
+	}
+	return string(b), nil
+}
+
+// ReadResponseBytes implements the byte-oriented read for Client.
+func (p *Port) ReadResponseBytes(ctx context.Context) ([]byte, error) {
+	const op errors.Op = "serial.ReadResponseBytes"
 
 	p.mu.RLock()
 	closed := p.closed
 	p.mu.RUnlock()
 	if closed {
-		return "", errors.New(op).Err(ErrClosed)
+		return nil, errors.New(op).Err(ErrClosed)
 	}
 
 	select {
 	case <-ctx.Done():
-		return "", errors.New(op).Err(ctx.Err())
+		return nil, errors.New(op).Err(ctx.Err())
 	case line, ok := <-p.responses:
 		if !ok {
-			return "", errors.New(op).Err(ErrClosed)
+			return nil, errors.New(op).Err(ErrClosed)
 		}
 		return line, nil
 	}
 }
 
-// Exec implements Client.
+// Exec implements Client, delegating to ExecBytes and converting the
+// response bytes to a string.
 func (p *Port) Exec(ctx context.Context, cmd string) (string, error) {
 	const op errors.Op = "serial.Exec"
 
-	if err := p.WriteCommand(ctx, cmd); err != nil {
+	b, err := p.ExecBytes(ctx, []byte(cmd))
+	if err != nil {
 		return "", errors.New(op).Err(err)
 	}
-	return p.ReadResponse(ctx)
+	return string(b), nil
+}
+
+// ExecBytes implements the byte-oriented Exec for Client.
+func (p *Port) ExecBytes(ctx context.Context, cmd []byte) ([]byte, error) {
+	const op errors.Op = "serial.ExecBytes"
+
+	if err := p.WriteCommandBytes(ctx, cmd); err != nil {
+		return nil, errors.New(op).Err(err)
+	}
+	return p.ReadResponseBytes(ctx)
 }
 
 // Errors implements Client.
@@ -240,7 +300,7 @@ func (p *Port) Exec(ctx context.Context, cmd string) (string, error) {
 //	    }
 //	}()
 func (p *Port) Errors() <-chan error {
-	return p.errCh
+	return p.ErrCh
 }
 
 // Close implements Client.
@@ -271,7 +331,7 @@ func (p *Port) Close() error {
 func (p *Port) readerLoop() {
 	defer close(p.doneCh)
 	defer close(p.responses)
-	defer close(p.errCh)
+	defer close(p.ErrCh)
 
 	buf := getReadBuf()
 	defer putReadBuf(buf)
@@ -296,7 +356,7 @@ func (p *Port) readerLoop() {
 
 			// Non-timeout error: surface it to callers, then exit.
 			select {
-			case p.errCh <- errors.New(errors.Op("serial.readerLoop")).Err(err):
+			case p.ErrCh <- errors.New(errors.Op("serial.readerLoop")).Err(err):
 			default:
 			}
 			return
@@ -315,7 +375,7 @@ func (p *Port) readerLoop() {
 					// best-effort basis without terminating the loop.
 					lineBuf = lineBuf[:0]
 					select {
-					case p.errCh <- errors.New(errors.Op("serial.readerLoop")).Msg("serial: dropped line exceeding maxLineSize (4096 bytes)"):
+					case p.ErrCh <- errors.New(errors.Op("serial.readerLoop")).Msg("serial: dropped line exceeding maxLineSize (4096 bytes)"):
 					default:
 					}
 				}
@@ -324,8 +384,11 @@ func (p *Port) readerLoop() {
 
 			lineBuf = append(lineBuf, chunk[:idx]...)
 			// emit line
+			// copy to avoid retaining the entire backing array across sends
+			lineCopy := make([]byte, len(lineBuf))
+			copy(lineCopy, lineBuf)
 			select {
-			case p.responses <- string(lineBuf):
+			case p.responses <- lineCopy:
 			case <-p.closeCh:
 				return
 			}
