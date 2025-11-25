@@ -1,4 +1,4 @@
-# serial
+# Station Manager: serial package
 
 A thin, thread-safe wrapper around [`go.bug.st/serial`](https://pkg.go.dev/go.bug.st/serial) for working with HF transceivers that implement CAT (Computer Aided Transceiver)
 commands.
